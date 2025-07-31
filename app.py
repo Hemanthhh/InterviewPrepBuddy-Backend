@@ -4,7 +4,6 @@ import os
 import threading
 import time
 from services.resume_processor import ResumeProcessor
-from services.screen_reader import ScreenReader
 from services.voice_handler import VoiceHandler
 from services.ai_assistant import AIAssistant
 from services.job_analyzer import JobAnalyzer
@@ -13,9 +12,6 @@ import logging
 from werkzeug.exceptions import RequestEntityTooLarge
 from flask_socketio import SocketIO, emit
 from flask import request
-import warnings
-
-warnings.filterwarnings("ignore", message="resource_tracker: There appear to be")
 
 app = Flask(__name__)
 CORS(app)
@@ -29,7 +25,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # Initialize services
 resume_processor = ResumeProcessor()
-screen_reader = ScreenReader()
+# VoiceHandler with configurable model size and device (uses env vars or defaults)
 voice_handler = VoiceHandler()
 ai_assistant = AIAssistant()
 job_analyzer = JobAnalyzer()
@@ -40,7 +36,6 @@ app_state = {
     "job_description": None,
     "interview_active": False,
     "listening": False,
-    "screen_monitoring": False,
     "responses": [],  # Store AI responses
     "microphone_thread": None,  # Track microphone monitoring thread
     "ai_speech_enabled": False,  # Track AI speech setting - disabled by default
@@ -54,6 +49,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
+
+# Reduce Werkzeug logging to reduce noise from frequent status requests
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 
 @app.errorhandler(Exception)
@@ -142,22 +140,7 @@ def start_interview():
 
         app_state["interview_active"] = True
         app_state["listening"] = True
-        app_state["screen_monitoring"] = False  # Disabled by default
         logging.info("Interview started")
-
-        # Start background services
-        threading.Thread(target=monitor_interview, daemon=True).start()
-
-        # Start microphone monitoring if not already running
-        if (
-            app_state["microphone_thread"] is None
-            or not app_state["microphone_thread"].is_alive()
-        ):
-            app_state["microphone_thread"] = threading.Thread(
-                target=monitor_microphone, daemon=True
-            )
-            app_state["microphone_thread"].start()
-            logging.info("Microphone monitoring thread started for interview")
 
         return jsonify({"message": "Interview started successfully"})
 
@@ -171,7 +154,6 @@ def stop_interview():
     try:
         app_state["interview_active"] = False
         app_state["listening"] = False
-        app_state["screen_monitoring"] = False
         logging.info("Interview stopped")
 
         return jsonify({"message": "Interview stopped successfully"})
@@ -183,12 +165,10 @@ def stop_interview():
 
 @app.route("/get-status")
 def get_status():
-    logging.debug("Status requested")
     return jsonify(
         {
             "interview_active": app_state["interview_active"],
             "listening": app_state["listening"],
-            "screen_monitoring": app_state["screen_monitoring"],
             "has_resume": app_state["resume_data"] is not None,
             "has_job_description": app_state["job_description"] is not None,
             "microphone_status": (
@@ -216,13 +196,19 @@ def set_model():
         data = request.json
         model_name = data.get("model_name")
 
+        logging.info(f"set-model endpoint called with data: {data}")
+        logging.info(f"Model name received: {model_name}")
+
         if not model_name:
+            logging.warning("No model name provided")
             return jsonify({"error": "Model name is required"}), 400
 
         success = ai_assistant.set_model(model_name)
         if success:
+            logging.info(f"Model set successfully to: {model_name}")
             return jsonify({"message": f"Model set to {model_name} successfully"})
         else:
+            logging.error("Failed to set model")
             return jsonify({"error": "Failed to set model"}), 400
 
     except Exception as e:
@@ -304,6 +290,34 @@ def get_ai_speech_settings():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/set-silence-detection", methods=["POST"])
+def set_silence_detection():
+    """Configure silence detection parameters for better transcription"""
+    try:
+        data = request.json
+        silence_threshold = data.get("silence_threshold", 0.01)
+        silence_duration = data.get("silence_duration", 1.0)
+        max_chunk_duration = data.get("max_chunk_duration", 20.0)
+        context_window = data.get("context_window", 30.0)
+
+        voice_handler.configure_silence_detection(
+            silence_threshold, silence_duration, max_chunk_duration, context_window
+        )
+
+        return jsonify(
+            {
+                "message": "Silence detection configured successfully",
+                "silence_threshold": silence_threshold,
+                "silence_duration": silence_duration,
+                "max_chunk_duration": max_chunk_duration,
+                "context_window": context_window,
+            }
+        )
+    except Exception as e:
+        logging.error(f"Error configuring silence detection: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/set-ai-speech-settings", methods=["POST"])
 def set_ai_speech_settings():
     """Set AI speech settings"""
@@ -320,10 +334,62 @@ def set_ai_speech_settings():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/test-connection")
-def test_connection():
-    """Test endpoint to verify server is running"""
-    return jsonify({"status": "ok", "message": "Server is running"})
+# Removed test endpoints - not needed for core functionality
+
+
+@app.route("/get-ai-response", methods=["POST"])
+def get_ai_response():
+    """Get AI response for a given question"""
+    try:
+        data = request.json
+        question = data.get("question", "")
+
+        if not question:
+            return jsonify({"status": "error", "message": "No question provided"}), 400
+
+        # Generate AI response
+        logging.info(f"Generating AI response for question: {question[:50]}...")
+        logging.info(f"Current model: {ai_assistant.get_current_model()}")
+        response = ai_assistant.generate_response(
+            question=question,
+            resume_data=app_state.get("resume_data"),
+            job_description=app_state.get("job_description"),
+        )
+
+        if response:
+            # Add to speaker history
+            voice_handler._record_speaker("user", question)
+            voice_handler._record_speaker("interviewer", response)
+
+            # Clear audio buffers to reset context for next question
+            voice_handler.clear_audio_buffers()
+
+            return jsonify(
+                {
+                    "status": "success",
+                    "response": response,
+                    "message": "AI response generated successfully",
+                }
+            )
+        else:
+            return (
+                jsonify(
+                    {"status": "error", "message": "Failed to generate AI response"}
+                ),
+                500,
+            )
+
+    except Exception as e:
+        logging.error(f"Error getting AI response: {e}")
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": f"Error generating AI response: {str(e)}",
+                }
+            ),
+            500,
+        )
 
 
 # Removed start_microphone endpoint - now handled by WebSocket
@@ -332,151 +398,19 @@ def test_connection():
 # Removed stop_microphone endpoint - now handled by WebSocket
 
 
-@app.route("/toggle-screen-monitoring", methods=["POST"])
-def toggle_screen_monitoring():
-    """Toggle screen monitoring on/off"""
-    try:
-        current_state = app_state["screen_monitoring"]
-        app_state["screen_monitoring"] = not current_state
-
-        logging.info(
-            f"Screen monitoring toggled {'ON' if app_state['screen_monitoring'] else 'OFF'}"
-        )
-
-        return jsonify(
-            {
-                "message": f"Screen monitoring {'started' if app_state['screen_monitoring'] else 'stopped'} successfully",
-                "screen_monitoring": app_state["screen_monitoring"],
-            }
-        )
-    except Exception as e:
-        logging.error(f"Error toggling screen monitoring: {e}")
-        return jsonify({"error": str(e)}), 500
+# Screen monitoring functionality has been removed
 
 
 # Removed clear-responses endpoint - clearing is now UI-only
 
 
-@app.route("/test-voice", methods=["POST"])
-def test_voice():
-    """Test the interviewer voice by speaking the provided text (if AI speech is enabled)"""
-    try:
-        data = request.json
-        text = data.get("text", "This is a test of the interviewer voice settings.")
-        if app_state["ai_speech_enabled"]:
-            voice_handler.speak_interviewer_response(text)
-        return jsonify(
-            {
-                "message": "Test voice triggered",
-                "spoken": app_state["ai_speech_enabled"],
-            }
-        )
-    except Exception as e:
-        logging.error(f"Error in test_voice: {e}")
-        return jsonify({"error": str(e)}), 500
+# Removed test-voice endpoint - not needed for core functionality
 
 
-def monitor_microphone():
-    """Background thread to monitor microphone independently"""
-    logging.info("Microphone monitoring started")
-    while True:
-        try:
-            # Only listen if listening is enabled
-            if app_state["listening"]:
-                audio_text = voice_handler.listen_for_speech()
-                if audio_text:
-                    logging.info(f"Audio detected: {audio_text}")
-
-                    # Check if it's a question
-                    if is_question(audio_text):
-                        # Generate and speak response
-                        response = ai_assistant.generate_response(
-                            question=audio_text,
-                            resume_data=app_state["resume_data"],
-                            job_description=app_state["job_description"],
-                        )
-
-                        logging.info(f"AI Response: {response}")
-
-                        # Always add to speaker history (even if not spoken)
-                        voice_handler._record_speaker("interviewer", response)
-
-                        # Only speak if AI speech is enabled
-                        if app_state["ai_speech_enabled"]:
-                            voice_handler.speak_interviewer_response(response)
-
-                        app_state["responses"].append(response)  # Store the response
-
-            time.sleep(0.5)  # Check more frequently for better responsiveness
-
-        except Exception as e:
-            logging.error(f"Error in monitor_microphone: {e}")
-            time.sleep(1)
+# Removed monitor_microphone and monitor_interview functions - replaced by websocket-based approach
 
 
-def monitor_interview():
-    """Background thread to monitor interview"""
-    while app_state["interview_active"]:
-        try:
-            # Monitor screen for questions
-            if app_state["screen_monitoring"]:
-                screen_text = screen_reader.capture_and_read()
-                if screen_text:
-                    # Process screen text for potential questions
-                    questions = extract_questions_from_text(screen_text)
-                    for question in questions:
-                        logging.info(f"Screen question detected: {question}")
-
-                        # Add screen-detected question to speaker history
-                        voice_handler._record_speaker("user", question)
-
-                        # Generate response for screen questions too
-                        response = ai_assistant.generate_response(
-                            question=question,
-                            resume_data=app_state["resume_data"],
-                            job_description=app_state["job_description"],
-                        )
-                        logging.info(f"AI Response: {response}")
-
-                        # Always add to speaker history (even if not spoken)
-                        voice_handler._record_speaker("interviewer", response)
-
-                        # Only speak if AI speech is enabled
-                        if app_state["ai_speech_enabled"]:
-                            voice_handler.speak_interviewer_response(response)
-
-                        app_state["responses"].append(response)
-
-            time.sleep(1)  # Prevent excessive CPU usage
-
-        except Exception as e:
-            logging.error(f"Error in monitor_interview: {e}")
-            time.sleep(1)
-
-
-def extract_questions_from_text(text):
-    """Extract potential questions from screen text"""
-    questions = []
-    sentences = text.split(".")
-
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if sentence.endswith("?") or any(
-            word in sentence.lower()
-            for word in [
-                "what",
-                "how",
-                "why",
-                "when",
-                "where",
-                "tell me",
-                "describe",
-                "explain",
-            ]
-        ):
-            questions.append(sentence)
-
-    return questions
+# extract_questions_from_text function removed as screen reader functionality was removed
 
 
 def is_question(text):
@@ -500,7 +434,7 @@ def is_question(text):
 @socketio.on("audio_stream")
 def handle_audio_stream(data):
     """Handle real-time audio streaming for speech-to-text"""
-    print(f"audio_stream from socket id: {request.sid}")
+    # print(f"audio_stream from socket id: {request.sid}")
     try:
         audio_chunk = data.get("audio_chunk", [])
         if not audio_chunk:
@@ -512,22 +446,50 @@ def handle_audio_stream(data):
         audio_data = np.array(audio_chunk, dtype=np.int16).astype(np.float32) / 32767.0
 
         # Process audio chunk for transcription
-        # For now, we'll simulate real-time transcription
-        # In a full implementation, you'd use a streaming STT service
         transcription_text = voice_handler.process_audio_chunk(audio_data)
-        print(f"Transcription result: {transcription_text}")  # Debug log
+        # print(f"Transcription result: {transcription_text}")  # Debug log
+
         if transcription_text:
+            # Emit transcription to UI
             socketio.emit("transcription", {"text": transcription_text}, to=request.sid)
             print(f"Emitting transcription: {transcription_text}")
+
+            # Store transcription for potential AI response (no auto-trigger)
+            # User will manually click "Ask AI" button when ready
+            print(f"Transcription stored: {transcription_text}")
 
     except Exception as e:
         print(f"Error processing audio stream: {e}")
 
 
+@socketio.on("websocket_audio")
+def handle_websocket_audio(data):
+    """Handle websocket audio data using the transcribe_websocket_audio method"""
+    try:
+        audio_data = data.get("audio_data")
+        if not audio_data:
+            return
+
+        # Use the websocket audio transcription method
+        transcription_text = voice_handler.transcribe_websocket_audio(
+            audio_data, request.sid
+        )
+
+        if transcription_text:
+            # Emit transcription to UI
+            socketio.emit("transcription", {"text": transcription_text}, to=request.sid)
+            print(f"Websocket transcription: {transcription_text}")
+
+            # Store transcription for potential AI response (no auto-trigger)
+            # User will manually click "Ask AI" button when ready
+            print(f"Transcription stored: {transcription_text}")
+
+    except Exception as e:
+        print(f"Error processing websocket audio: {e}")
+
+
 # Manual test event for debugging
-@socketio.on("test_transcription")
-def handle_test_transcription():
-    emit("transcription", {"text": "This is a test transcription!"})
+# Removed test_transcription websocket handler - not needed for core functionality
 
 
 @socketio.on("question")
@@ -539,11 +501,15 @@ def handle_question(data):
             return
 
         # Emit user question for real-time UI update
-        emit("user_question", {"question": question}, broadcast=True)
+        emit("user_question", {"question": question}, to=request.sid)
 
         logging.info(f"Processing question via WebSocket: {question}")
 
         # Generate AI response with streaming
+        logging.info(
+            f"Generating streaming AI response for question: {question[:50]}..."
+        )
+        logging.info(f"Current model: {ai_assistant.get_current_model()}")
         response_generator = ai_assistant.generate_streaming_response(
             question=question,
             resume_data=app_state.get("resume_data"),
@@ -555,20 +521,26 @@ def handle_question(data):
         try:
             for chunk in response_generator:
                 if chunk:
-                    emit("ai_response", {"text": chunk})
+                    emit("ai_response", {"text": chunk}, to=request.sid)
                     full_response += chunk
             # Send completion event
-            emit("ai_response_complete", {"status": "success"})
+            emit("ai_response_complete", {"status": "success"}, to=request.sid)
             # Add to speaker history
             voice_handler._record_speaker("user", question)
             voice_handler._record_speaker("interviewer", full_response)
+            # Clear audio buffers to reset context for next question
+            voice_handler.clear_audio_buffers()
         except Exception as e:
             logging.error(f"Error during response streaming: {e}")
-            emit("ai_response_error", {"error": str(e)})
+            emit("ai_response_error", {"error": str(e)}, to=request.sid)
     except Exception as e:
         logging.error(f"Error processing question: {e}")
-        emit("ai_response_error", {"error": "Failed to generate response"})
+        emit(
+            "ai_response_error",
+            {"error": "Failed to generate response"},
+            to=request.sid,
+        )
 
 
 if __name__ == "__main__":
-    socketio.run(app, debug=True, host="0.0.0.0", port=5001)
+    socketio.run(app, debug=True, host="0.0.0.0", allow_unsafe_werkzeug=True, port=5001)

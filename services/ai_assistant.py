@@ -19,7 +19,7 @@ class AIAssistant:
         # Configuration for local AI model
         self.local_model_url = "http://localhost:11434/api/generate"  # Ollama default
         self.model_name = (
-            "incept5/llama3.1-claude:latest"  # Default model, can be changed
+            "chevalblanc/gpt-4o-mini:latest"  # Default model, can be changed
         )
         self.max_tokens = 5000  # Reduced for faster responses
 
@@ -158,6 +158,7 @@ class AIAssistant:
             }
 
             logger.info(f"Making request to local model: {self.local_model_url}")
+            logger.info(f"Using model: {self.model_name}")
             # Make request to local model
             response = requests.post(self.local_model_url, json=payload, timeout=30)
 
@@ -207,6 +208,7 @@ class AIAssistant:
             logger.info(
                 f"Making streaming request to local model: {self.local_model_url}"
             )
+            logger.info(f"Using model: {self.model_name}")
 
             # Make streaming request to local model
             response = requests.post(
@@ -268,7 +270,7 @@ class AIAssistant:
                         "role": "system",
                         "content": "You are an AI assistant helping me to prepare for job interviews. \
                          I want to know how to answer concisely and clearly to point in an interview. Provide professional, relevant responses.\
-                            Answer everything in 100 to 150 words only",
+                            Answer everything in 100 to 150 words only. ALWAYS respond in English only, regardless of the language of the question.",
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -306,7 +308,7 @@ class AIAssistant:
                         "role": "system",
                         "content": "You are an AI assistant helping me to prepare for job interviews. \
                          I want to know how to answer concisely and clearly to point in an interview. Provide professional, relevant responses.\
-                            Answer everything in 100 to 150 words only",
+                            Answer everything in 100 to 200 words only. ALWAYS respond in English only, regardless of the language of the question.",
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -328,7 +330,8 @@ class AIAssistant:
         logger.debug("Building AI prompt")
         prompt = f"""You are an AI assistant helping with a job interview. You are the candidate being interviewed.
 
-CRITICAL: Respond in 100-150 words only. Be direct and professional.
+CRITICAL: Respond in 100-200 words only. Be direct and professional.
+IMPORTANT: Always respond in English only, regardless of the language of the question.
 
 Question: {question}
 
@@ -360,9 +363,10 @@ Instructions:
 1. Answer directly and professionally
 2. Use your background as reference
 3. Be confident and authentic
-4. Stay within 100-150 words
+4. Stay within 100-200 words
 5. Focus on the specific question
 6. No filler words or sentences
+7. ALWAYS respond in English only, even if the question is in another language
 
 Response:"""
 
@@ -464,10 +468,12 @@ Response:"""
 
     def set_model(self, model_name):
         """Set the current model to use"""
+        logger.info(f"set_model called with: {model_name}")
         if model_name:
             self.model_name = model_name
             logger.info(f"Model set to: {self.model_name}")
             return True
+        logger.warning("set_model called with empty model_name")
         return False
 
     def get_current_model(self):
@@ -502,7 +508,7 @@ Response:"""
             logger.error(f"Local model connection test failed: {e}", exc_info=True)
             return False
 
-    def _enforce_word_limit(self, response, min_words=1, max_words=150):
+    def _enforce_word_limit(self, response, min_words=1, max_words=200):
         """Enforce word limit on AI responses"""
         if not response:
             return response
@@ -545,7 +551,7 @@ Response:"""
             return 0
         return len(text.split())
 
-    def validate_word_count(self, text, min_words=1, max_words=150):
+    def validate_word_count(self, text, min_words=1, max_words=200):
         """Validate if text meets word count requirements"""
         word_count = self.get_word_count(text)
         is_valid = min_words <= word_count <= max_words
