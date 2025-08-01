@@ -1,7 +1,7 @@
 import os
 import re
 from docx import Document
-import PyPDF2
+import pypdf
 import json
 
 class ResumeProcessor:
@@ -26,7 +26,7 @@ class ResumeProcessor:
         text = ""
         try:
             with open(file_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
+                pdf_reader = pypdf.PdfReader(file)
                 for page in pdf_reader.pages:
                     text += page.extract_text() + "\n"
         except Exception as e:
@@ -57,8 +57,6 @@ class ResumeProcessor:
         """Parse resume text and extract structured data"""
         resume_data = {
             'name': self._extract_name(text),
-            'email': self._extract_email(text),
-            'phone': self._extract_phone(text),
             'skills': self._extract_skills(text),
             'experience': self._extract_experience(text),
             'education': self._extract_education(text),
@@ -79,26 +77,6 @@ class ResumeProcessor:
                     return line
         return "Name not found"
     
-    def _extract_email(self, text):
-        """Extract email from resume text"""
-        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-        emails = re.findall(email_pattern, text)
-        return emails[0] if emails else "Email not found"
-    
-    def _extract_phone(self, text):
-        """Extract phone number from resume text"""
-        phone_patterns = [
-            r'\b\d{3}-\d{3}-\d{4}\b',
-            r'\b\(\d{3}\)\s?\d{3}-\d{4}\b',
-            r'\b\d{3}\.\d{3}\.\d{4}\b',
-            r'\b\+\d{1,3}\s?\d{3}\s?\d{3}\s?\d{4}\b'
-        ]
-        
-        for pattern in phone_patterns:
-            phones = re.findall(pattern, text)
-            if phones:
-                return phones[0]
-        return "Phone not found"
     
     def _extract_skills(self, text):
         """Extract skills from resume text"""

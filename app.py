@@ -163,19 +163,7 @@ def stop_interview():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/get-status")
-def get_status():
-    return jsonify(
-        {
-            "interview_active": app_state["interview_active"],
-            "listening": app_state["listening"],
-            "has_resume": app_state["resume_data"] is not None,
-            "has_job_description": app_state["job_description"] is not None,
-            "microphone_status": (
-                "Listening..." if app_state["listening"] else "Stopped"
-            ),
-        }
-    )
+
 
 
 @app.route("/get-available-models")
@@ -392,27 +380,6 @@ def get_ai_response():
         )
 
 
-# Removed start_microphone endpoint - now handled by WebSocket
-
-
-# Removed stop_microphone endpoint - now handled by WebSocket
-
-
-# Screen monitoring functionality has been removed
-
-
-# Removed clear-responses endpoint - clearing is now UI-only
-
-
-# Removed test-voice endpoint - not needed for core functionality
-
-
-# Removed monitor_microphone and monitor_interview functions - replaced by websocket-based approach
-
-
-# extract_questions_from_text function removed as screen reader functionality was removed
-
-
 def is_question(text):
     """Check if text contains a question"""
     question_indicators = [
@@ -431,6 +398,19 @@ def is_question(text):
 
 
 # Add WebSocket event handlers at the end of the file:
+
+@socketio.on('connect')
+def handle_connect():
+    """Handle WebSocket connection"""
+    print(f"Client connected: {request.sid}")
+    logging.info(f"WebSocket client connected: {request.sid}")
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Handle WebSocket disconnection"""
+    print(f"Client disconnected: {request.sid}")
+    logging.info(f"WebSocket client disconnected: {request.sid}")
+
 @socketio.on("audio_stream")
 def handle_audio_stream(data):
     """Handle real-time audio streaming for speech-to-text"""
@@ -440,6 +420,7 @@ def handle_audio_stream(data):
         if not audio_chunk:
             return
 
+
         # Convert audio chunk back to proper format for processing
         import numpy as np
 
@@ -447,16 +428,12 @@ def handle_audio_stream(data):
 
         # Process audio chunk for transcription
         transcription_text = voice_handler.process_audio_chunk(audio_data)
-        # print(f"Transcription result: {transcription_text}")  # Debug log
 
         if transcription_text:
             # Emit transcription to UI
             socketio.emit("transcription", {"text": transcription_text}, to=request.sid)
             print(f"Emitting transcription: {transcription_text}")
 
-            # Store transcription for potential AI response (no auto-trigger)
-            # User will manually click "Ask AI" button when ready
-            print(f"Transcription stored: {transcription_text}")
 
     except Exception as e:
         print(f"Error processing audio stream: {e}")
@@ -486,60 +463,7 @@ def handle_websocket_audio(data):
 
     except Exception as e:
         print(f"Error processing websocket audio: {e}")
-
-
-# Manual test event for debugging
-# Removed test_transcription websocket handler - not needed for core functionality
-
-
-@socketio.on("question")
-def handle_question(data):
-    """Handle questions and generate streaming AI responses"""
-    try:
-        question = data.get("question", "")
-        if not question:
-            return
-
-        # Emit user question for real-time UI update
-        emit("user_question", {"question": question}, to=request.sid)
-
-        logging.info(f"Processing question via WebSocket: {question}")
-
-        # Generate AI response with streaming
-        logging.info(
-            f"Generating streaming AI response for question: {question[:50]}..."
-        )
-        logging.info(f"Current model: {ai_assistant.get_current_model()}")
-        response_generator = ai_assistant.generate_streaming_response(
-            question=question,
-            resume_data=app_state.get("resume_data"),
-            job_description=app_state.get("job_description"),
-        )
-
-        # Stream the response in chunks
-        full_response = ""
-        try:
-            for chunk in response_generator:
-                if chunk:
-                    emit("ai_response", {"text": chunk}, to=request.sid)
-                    full_response += chunk
-            # Send completion event
-            emit("ai_response_complete", {"status": "success"}, to=request.sid)
-            # Add to speaker history
-            voice_handler._record_speaker("user", question)
-            voice_handler._record_speaker("interviewer", full_response)
-            # Clear audio buffers to reset context for next question
-            voice_handler.clear_audio_buffers()
-        except Exception as e:
-            logging.error(f"Error during response streaming: {e}")
-            emit("ai_response_error", {"error": str(e)}, to=request.sid)
-    except Exception as e:
-        logging.error(f"Error processing question: {e}")
-        emit(
-            "ai_response_error",
-            {"error": "Failed to generate response"},
-            to=request.sid,
-        )
+        logging.error(f"Error processing websocket audio: {e}")
 
 
 if __name__ == "__main__":

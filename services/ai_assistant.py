@@ -60,8 +60,6 @@ class AIAssistant:
             )
             if response:
                 logger.info("Successfully generated response using local model")
-                response = self._enforce_word_limit(response)
-                logger.debug(f"Response length: {len(response)}")
                 return response
 
             # Fallback to OpenAI if local model fails
@@ -72,8 +70,6 @@ class AIAssistant:
                 )
                 if response:
                     logger.info("Successfully generated response using OpenAI")
-                    response = self._enforce_word_limit(response)
-                    logger.debug(f"Response length: {len(response)}")
                     return response
 
             # Final fallback to template response
@@ -81,7 +77,6 @@ class AIAssistant:
             response = self._generate_template_response(
                 question, resume_data, job_description
             )
-            response = self._enforce_word_limit(response)
             logger.info("Generated template response")
             return response
 
@@ -89,51 +84,6 @@ class AIAssistant:
             logger.error(f"Error generating AI response: {e}", exc_info=True)
             return "I apologize, but I'm having trouble generating a response right now. Could you please repeat the question?"
 
-    def generate_streaming_response(
-        self, question, resume_data=None, job_description=None, context=""
-    ):
-        """Generate AI response in streaming chunks for real-time display"""
-        logger.info(f"Generating streaming response for question: {question[:100]}...")
-
-        try:
-            # Try local model with streaming first
-            logger.info("Attempting to generate streaming response using local model")
-            for chunk in self._generate_local_streaming_response(
-                question, resume_data, job_description, context
-            ):
-                yield chunk
-                return  # Exit after first successful stream
-
-            # Fallback to OpenAI streaming if local model fails
-            if self.openai_api_key:
-                logger.info("Local model failed, attempting OpenAI streaming fallback")
-                for chunk in self._generate_openai_streaming_response(
-                    question, resume_data, job_description, context
-                ):
-                    yield chunk
-                    return  # Exit after first successful stream
-
-            # Final fallback to template response (non-streaming)
-            logger.info("AI models failed, using template response")
-            response = self._generate_template_response(
-                question, resume_data, job_description
-            )
-            response = self._enforce_word_limit(response)
-            # Split template response into chunks for streaming effect
-            words = response.split()
-            chunk_size = 2  # Send 2 words at a time for more frequent updates
-            for i in range(0, len(words), chunk_size):
-                chunk = " ".join(words[i : i + chunk_size])
-                if i + chunk_size < len(words):
-                    chunk += " "  # Add space for next chunk
-                yield chunk
-                import time
-
-                time.sleep(0.03)  # Faster delay for more responsive streaming
-
-        except Exception as e:
-            logger.error(f"Error generating streaming AI response: {e}", exc_info=True)
-            yield "I apologize, but I'm having trouble generating a response right now."
 
     def _generate_local_response(self, question, resume_data, job_description, context):
         """Generate response using local AI model (Ollama)"""
@@ -165,6 +115,8 @@ class AIAssistant:
             if response.status_code == 200:
                 result = response.json()
                 ai_response = result.get("response", "").strip()
+                if ai_response[:7] == "<think>":
+                    ai_response = ai_response.split("</think>")[1]
                 logger.info(ai_response)
                 logger.info("Local model request successful")
                 logger.debug(f"Raw response length: {len(ai_response)}")
@@ -183,67 +135,6 @@ class AIAssistant:
             logger.error(f"Error with local model: {e}", exc_info=True)
             return None
 
-    def _generate_local_streaming_response(
-        self, question, resume_data, job_description, context
-    ):
-        """Generate streaming response using local AI model (Ollama)"""
-        try:
-            logger.debug("Building prompt for local streaming model")
-            prompt = self._build_prompt(question, resume_data, job_description, context)
-
-            # Prepare request payload with streaming enabled
-            payload = {
-                "model": self.model_name,
-                "prompt": prompt,
-                "stream": True,  # Enable streaming
-                "options": {
-                    "temperature": 0.3,  # Lower temperature for faster, more focused responses
-                    "max_tokens": self.max_tokens,
-                    "top_p": 0.8,  # Slightly lower for more focused responses
-                    "top_k": 40,  # Add top_k for better response quality
-                    "repeat_penalty": 1.1,  # Prevent repetition
-                },
-            }
-
-            logger.info(
-                f"Making streaming request to local model: {self.local_model_url}"
-            )
-            logger.info(f"Using model: {self.model_name}")
-
-            # Make streaming request to local model
-            response = requests.post(
-                self.local_model_url,
-                json=payload,
-                timeout=30,
-                stream=True,  # Enable response streaming
-            )
-
-            if response.status_code == 200:
-                for line in response.iter_lines():
-                    if line:
-                        try:
-                            data = json.loads(line.decode("utf-8"))
-                            if "response" in data:
-                                chunk = data["response"]
-                                if chunk:
-                                    yield chunk
-                        except json.JSONDecodeError:
-                            continue
-                        except Exception as e:
-                            logger.error(f"Error parsing streaming response: {e}")
-                            continue
-            else:
-                logger.warning(
-                    f"Local model streaming request failed with status {response.status_code}"
-                )
-                return None
-
-        except requests.RequestException as e:
-            logger.error(f"Error connecting to local model for streaming: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Error with local model streaming: {e}", exc_info=True)
-            return None
 
     def _generate_openai_response(
         self, question, resume_data, job_description, context
@@ -285,44 +176,6 @@ class AIAssistant:
 
         except Exception as e:
             logger.error(f"Error with OpenAI API: {e}", exc_info=True)
-            return None
-
-    def _generate_openai_streaming_response(
-        self, question, resume_data, job_description, context
-    ):
-        """Generate streaming response using OpenAI API"""
-        try:
-            logger.debug("Importing OpenAI client for streaming")
-            from openai import OpenAI
-
-            client = OpenAI(api_key=self.openai_api_key)
-            prompt = self._build_prompt(question, resume_data, job_description, context)
-
-            logger.info("Making streaming request to OpenAI API")
-
-            # Make streaming request to OpenAI
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an AI assistant helping me to prepare for job interviews. \
-                         I want to know how to answer concisely and clearly to point in an interview. Provide professional, relevant responses.\
-                            Answer everything in 100 to 200 words only. ALWAYS respond in English only, regardless of the language of the question.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=self.max_tokens,
-                temperature=0.3,  # Lower temperature for faster, more focused responses
-                stream=True,  # Enable streaming
-            )
-
-            for chunk in response:
-                if chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
-
-        except Exception as e:
-            logger.error(f"Error with OpenAI API streaming: {e}", exc_info=True)
             return None
 
     def _build_prompt(self, question, resume_data, job_description, context):
@@ -367,6 +220,7 @@ Instructions:
 5. Focus on the specific question
 6. No filler words or sentences
 7. ALWAYS respond in English only, even if the question is in another language
+8. Always answer in First Person point of view
 
 Response:"""
 
@@ -479,98 +333,3 @@ Response:"""
     def get_current_model(self):
         """Get the current model name"""
         return self.model_name
-
-    def test_local_model_connection(self):
-        """Test connection to local AI model"""
-        logger.info("Testing local model connection")
-        try:
-            test_payload = {
-                "model": self.model_name,
-                "prompt": "Hello",
-                "stream": False,
-            }
-
-            logger.debug(f"Making test request to: {self.local_model_url}")
-            response = requests.post(
-                self.local_model_url, json=test_payload, timeout=10
-            )
-
-            if response.status_code == 200:
-                logger.info("Local model connection test successful")
-                return True
-            else:
-                logger.warning(
-                    f"Local model connection test failed with status: {response.status_code}"
-                )
-                return False
-
-        except Exception as e:
-            logger.error(f"Local model connection test failed: {e}", exc_info=True)
-            return False
-
-    def _enforce_word_limit(self, response, min_words=1, max_words=200):
-        """Enforce word limit on AI responses"""
-        if not response:
-            return response
-
-        words = response.split()
-        word_count = len(words)
-        logger.debug(f"Response word count: {word_count}")
-
-        if word_count < min_words:
-            logger.warning(
-                f"Response too short ({word_count} words), padding with additional context"
-            )
-            # Add some padding to reach minimum word count
-            padding = f" I want to emphasize that my experience and skills make me a strong candidate for this position. I'm committed to continuous learning and contributing effectively to your team's success."
-            response += padding
-            words = response.split()
-            word_count = len(words)
-            logger.debug(f"After padding, word count: {word_count}")
-
-        if word_count > max_words:
-            logger.warning(
-                f"Response too long ({word_count} words), truncating to {max_words} words"
-            )
-            # Truncate to max words, trying to end at a complete sentence
-            truncated_words = words[:max_words]
-            response = " ".join(truncated_words)
-
-            # Try to end at a sentence boundary
-            last_period = response.rfind(".")
-            if last_period > len(response) * 0.8:  # If period is in last 20% of text
-                response = response[: last_period + 1]
-
-            logger.debug(f"After truncation, word count: {len(response.split())}")
-
-        return response
-
-    def get_word_count(self, text):
-        """Get word count of a text"""
-        if not text:
-            return 0
-        return len(text.split())
-
-    def validate_word_count(self, text, min_words=1, max_words=200):
-        """Validate if text meets word count requirements"""
-        word_count = self.get_word_count(text)
-        is_valid = min_words <= word_count <= max_words
-
-        logger.info(f"Word count validation: {word_count} words (valid: {is_valid})")
-
-        if word_count < min_words:
-            logger.warning(f"Text is {min_words - word_count} words short of minimum")
-        elif word_count > max_words:
-            logger.warning(f"Text is {word_count - max_words} words over maximum")
-
-        return {
-            "word_count": word_count,
-            "is_valid": is_valid,
-            "min_words": min_words,
-            "max_words": max_words,
-            "status": (
-                "valid"
-                if is_valid
-                else "too_short" if word_count < min_words else "too_long"
-            ),
-        }
